@@ -13,7 +13,6 @@ Terminal teleprompter that renders Markdown with syntax highlighting and a subtl
 
 ```bash
 cargo run --release -- speech_example.md   # run with the bundled sample script
-cargo run --release --                     # defaults to speech.txt in the repo root
 ```
 
 You need Rust with edition 2024 support (Rust 1.79+ recommended).
@@ -44,6 +43,3 @@ The app opens in an alternate screen; when you quit, your terminal returns to no
 - Long lines do not wrap; they will flow off the right edge of your terminal.
 - Rendering relies on ANSI escape codes; some terminals without truecolor support may look less vibrant.
 
-## License
-
-MIT, like the rest of the repo.
