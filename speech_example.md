@@ -24,13 +24,14 @@ fn main() {
 }
 ```
 
-## Data Overview
+## Table Example 
 
-| Feature | Status | Priority |
+| Text | Model | Tone |
 |---------|--------|----------|
-| Parsing | Done | High |
-| Styling | Active | High |
-| Export | Pending | Low |
+| AI operates as an apparatus of capital’s instrumental rationality, while capital itself mediates the structural distribution of social power. | Qwen3.6-Plus | Frankfurt School Critical Theory |
+| AI is a means of capital, and capital is a means of distributing social power. | DeepSeek-V3 | Marxism |
+| AI is capital's instrument; capital is the instrument of hegemonic power distribution. | Kimi-k2.5 | Gramscian / Hegemonic |
+
 
 ## Quote
 

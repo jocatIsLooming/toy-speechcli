@@ -201,21 +201,23 @@ impl MarkdownRenderer {
             let mut cells = Vec::new();
             for (i, cell) in row.iter().enumerate() {
                 let width = col_widths.get(i).copied().unwrap_or(10);
-                let stripped = strip_ansi(cell);
-                let padding = width.saturating_sub(stripped.chars().count());
+                let truncated = truncate_visible(cell, width);
+                let display_width = strip_ansi(&truncated).chars().count();
+                // Always keep one trailing space so the right side matches the left padding
+                let padding = width.saturating_sub(display_width).saturating_add(1);
                 let styled_cell = if row_idx == 0 {
                     format!(
                         "{}{}{}{}{}",
                         COLOR_BOLD,
                         COLOR_YELLOW,
-                        cell,
+                        truncated,
                         COLOR_RESET,
                         " ".repeat(padding)
                     )
                 } else {
-                    format!("{}{}{}", cell, " ".repeat(padding), COLOR_RESET)
+                    format!("{}{}{}", truncated, " ".repeat(padding), COLOR_RESET)
                 };
-                cells.push(format!(" {} {}{}", COLOR_GRAY, styled_cell, COLOR_GRAY));
+                cells.push(format!(" {}{}{}", COLOR_GRAY, styled_cell, COLOR_GRAY));
             }
             lines.push(format!("{}│{}│{}", COLOR_GRAY, cells.join("│"), COLOR_RESET));
 
@@ -361,6 +363,49 @@ fn strip_ansi(text: &str) -> String {
     result
 }
 
+fn truncate_visible(text: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+
+    let visible_len = strip_ansi(text).chars().count();
+    if visible_len <= max_width {
+        return text.to_string();
+    }
+
+    let target_visible = max_width.saturating_sub(1);
+    let mut result = String::new();
+    let mut in_escape = false;
+    let mut visible = 0;
+
+    for ch in text.chars() {
+        if in_escape {
+            result.push(ch);
+            if ch.is_ascii_alphabetic() {
+                in_escape = false;
+            }
+            continue;
+        }
+
+        if ch == '\x1b' {
+            in_escape = true;
+            result.push(ch);
+            continue;
+        }
+
+        if visible < target_visible {
+            result.push(ch);
+            visible += 1;
+        } else {
+            break;
+        }
+    }
+
+    result.push('…');
+    result.push_str(COLOR_RESET);
+    result
+}
+
 pub fn apply_opacity_to_line(line: &RenderedLine, opacity: u8) -> String {
     if opacity >= 255 {
         return line.content.clone();
@@ -478,6 +523,7 @@ fn split_table_prefix(text: &str) -> (String, &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::{InlineSpan, InlineStyle};
 
     #[test]
     fn dims_text_before_first_escape_sequence() {
@@ -516,5 +562,59 @@ mod tests {
             "gray should be re-applied after color code"
         );
         assert_eq!(strip_ansi(&dimmed), "start colored");
+    }
+
+    #[test]
+    fn truncates_visible_text_with_ellipsis() {
+        let original = format!("{}Some very long bold text{}", COLOR_BOLD, COLOR_RESET);
+
+        let truncated = truncate_visible(&original, 10);
+
+        assert_eq!(strip_ansi(&truncated), "Some very…");
+        assert!(
+            truncated.ends_with(COLOR_RESET),
+            "truncation should close color sequences"
+        );
+    }
+
+    #[test]
+    fn table_cells_truncate_without_breaking_grid() {
+        let renderer = MarkdownRenderer::new();
+        let rows = vec![
+            vec![vec![InlineSpan {
+                text: "Header".to_string(),
+                style: InlineStyle::default(),
+            }]],
+            vec![vec![InlineSpan {
+                text: "This is an extremely long cell that should be truncated to fit the column width".to_string(),
+                style: InlineStyle::default(),
+            }]],
+        ];
+
+        let rendered = renderer.render_table(&rows);
+        let expected_len = strip_ansi(&rendered[0]).chars().count();
+
+        for line in &rendered {
+            println!(
+                "{} -> {}",
+                strip_ansi(line),
+                strip_ansi(line).chars().count()
+            );
+        }
+
+        for line in &rendered {
+            assert_eq!(
+                strip_ansi(line).chars().count(),
+                expected_len,
+                "table rows should align with the grid"
+            );
+        }
+
+        assert!(
+            rendered
+                .iter()
+                .any(|line| strip_ansi(line).contains('…')),
+            "long cell content should be truncated with an ellipsis"
+        );
     }
 }
