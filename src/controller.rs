@@ -2,16 +2,17 @@ use std::fs;
 use std::io::{self, Write};
 
 use crossterm::{
+    ExecutableCommand, QueueableCommand,
     cursor::{Hide, MoveTo, Show},
     event::{self, Event, KeyCode, KeyEventKind},
     terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
-    ExecutableCommand, QueueableCommand,
 };
 
 use crate::parser::MarkdownParser;
-use crate::renderer::{apply_opacity_to_line, LineType, MarkdownRenderer, RenderedLine};
+use crate::renderer::{LineType, MarkdownRenderer, RenderedLine, apply_opacity_to_line};
 
 const LOW_OPACITY: u8 = 50;
+const FOCUS_BAND_RADIUS: usize = 2;
 
 pub fn run() -> io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -45,25 +46,30 @@ pub fn run() -> io::Result<()> {
     loop {
         stdout.queue(Clear(ClearType::All))?;
 
-        let visible_range = calculate_visible_range(current_idx, lines.len(), viewport_height);
+        let focus_idx = focus_index_for_line(&lines, current_idx);
+        let viewport_indices = centered_viewport_indices(focus_idx, lines.len(), viewport_height);
 
         let active_block = active_block_range(&lines, current_idx);
 
-        for (i, line_idx) in visible_range.iter().enumerate() {
-            let line = &lines[*line_idx];
-            let in_active_block = active_block
-                .map(|(start, end)| *line_idx >= start && *line_idx <= end)
-                .unwrap_or(false);
-            let is_focus_line = *line_idx == current_idx;
+        for (row, maybe_line_idx) in viewport_indices.iter().enumerate() {
+            stdout.queue(MoveTo(0, row as u16))?;
 
-            let opacity = if in_active_block || is_focus_line {
-                255
-            } else {
-                LOW_OPACITY
+            let Some(line_idx) = *maybe_line_idx else {
+                continue;
             };
 
-            let row = i as u16;
-            stdout.queue(MoveTo(0, row))?;
+            let line = &lines[line_idx];
+            let in_active_block = active_block
+                .map(|(start, end)| line_idx >= start && line_idx <= end)
+                .unwrap_or(false);
+
+            let opacity = if in_active_block || is_in_focus_band(focus_idx, line_idx, 0) {
+                255
+            // } else if is_in_focus_band(focus_idx, line_idx, 1) {
+            //     155
+            } else {
+                55
+            };
 
             let styled_line = apply_opacity_to_line(line, opacity);
             print!("{}", styled_line);
@@ -96,37 +102,70 @@ pub fn run() -> io::Result<()> {
     Ok(())
 }
 
-fn calculate_visible_range(current: usize, total: usize, viewport_height: usize) -> Vec<usize> {
-    let half_viewport = viewport_height / 2;
+fn centered_viewport_indices(
+    current: usize,
+    total: usize,
+    viewport_height: usize,
+) -> Vec<Option<usize>> {
+    if viewport_height == 0 {
+        return Vec::new();
+    }
 
-    let start = current.saturating_sub(half_viewport);
-    let end = (start + viewport_height).min(total);
-    let start = end.saturating_sub(viewport_height);
+    let center_row = viewport_height / 2;
 
-    (start..end).collect()
+    (0..viewport_height)
+        .map(|row| {
+            let offset = row as isize - center_row as isize;
+            let idx = current as isize + offset;
+
+            if idx >= 0 && idx < total as isize {
+                Some(idx as usize)
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 fn active_block_range(lines: &[RenderedLine], current_idx: usize) -> Option<(usize, usize)> {
-    if lines.is_empty() || current_idx >= lines.len() {
+    block_range_at(lines, current_idx)
+}
+
+fn block_range_at(lines: &[RenderedLine], idx: usize) -> Option<(usize, usize)> {
+    if lines.is_empty() || idx >= lines.len() {
         return None;
     }
 
-    let line_type = lines[current_idx].line_type;
+    let line_type = lines[idx].line_type;
     if line_type != LineType::CodeBlock && line_type != LineType::Table {
         return None;
     }
 
-    let mut start = current_idx;
+    let mut start = idx;
     while start > 0 && lines[start - 1].line_type == line_type {
         start -= 1;
     }
 
-    let mut end = current_idx;
+    let mut end = idx;
     while end + 1 < lines.len() && lines[end + 1].line_type == line_type {
         end += 1;
     }
 
     Some((start, end))
+}
+
+fn focus_index_for_line(lines: &[RenderedLine], idx: usize) -> usize {
+    if let Some((start, end)) = block_range_at(lines, idx) {
+        start + (end - start) / 2
+    } else {
+        idx
+    }
+}
+
+fn is_in_focus_band(focus_idx: usize, line_idx: usize, radius: usize) -> bool {
+    let start = focus_idx.saturating_sub(radius);
+    let end = focus_idx.saturating_add(radius);
+    line_idx >= start && line_idx <= end
 }
 
 fn move_down(lines: &[RenderedLine], current_idx: usize) -> usize {
@@ -141,7 +180,9 @@ fn move_down(lines: &[RenderedLine], current_idx: usize) -> usize {
 
     if current_idx < lines.len() - 1 {
         let target = current_idx + 1;
-        find_nonempty_forward(lines, target).unwrap_or(current_idx)
+        find_nonempty_forward(lines, target)
+            .map(|idx| focus_index_for_line(lines, idx))
+            .unwrap_or(current_idx)
     } else {
         current_idx
     }
@@ -162,7 +203,9 @@ fn move_up(lines: &[RenderedLine], current_idx: usize) -> usize {
 
     if current_idx > 0 {
         let target = current_idx - 1;
-        find_nonempty_backward(lines, target).unwrap_or(current_idx)
+        find_nonempty_backward(lines, target)
+            .map(|idx| focus_index_for_line(lines, idx))
+            .unwrap_or(current_idx)
     } else {
         current_idx
     }
