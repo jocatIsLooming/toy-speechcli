@@ -170,6 +170,9 @@ impl MarkdownParser {
                         }
                     }
                 }
+                Event::End(TagEnd::Item) => {
+                    Self::push_text_block(&mut blocks, &mut current_spans, &block_style);
+                }
                 Event::Start(Tag::Heading { level, .. }) => {
                     Self::push_text_block(&mut blocks, &mut current_spans, &block_style);
                     block_style.heading_level = Some(level as u8);

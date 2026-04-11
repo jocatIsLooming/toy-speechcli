@@ -344,7 +344,7 @@ impl RenderedLine {
     }
 }
 
-fn strip_ansi(text: &str) -> String {
+pub fn strip_ansi(text: &str) -> String {
     let mut result = String::new();
     let mut in_escape = false;
 
