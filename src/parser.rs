@@ -23,9 +23,17 @@ pub struct BlockStyle {
 
 #[derive(Clone)]
 pub enum ParsedBlock {
-    Text { spans: Vec<InlineSpan>, style: BlockStyle },
-    CodeBlock { lang: String, content: String },
-    Table { rows: Vec<Vec<Vec<InlineSpan>>> },
+    Text {
+        spans: Vec<InlineSpan>,
+        style: BlockStyle,
+    },
+    CodeBlock {
+        lang: String,
+        content: String,
+    },
+    Table {
+        rows: Vec<Vec<Vec<InlineSpan>>>,
+    },
     Empty,
     Rule,
 }
@@ -143,7 +151,9 @@ impl MarkdownParser {
                     current_spans.clear();
                 }
                 Event::Start(Tag::List(start_num)) => {
-                    let kind = start_num.map(ListKind::Ordered).unwrap_or(ListKind::Unordered);
+                    let kind = start_num
+                        .map(ListKind::Ordered)
+                        .unwrap_or(ListKind::Unordered);
                     list_stack.push(kind);
                 }
                 Event::End(TagEnd::List(_)) => {
@@ -187,9 +197,13 @@ impl MarkdownParser {
                     blocks.push(ParsedBlock::Empty);
                 }
                 Event::Start(Tag::Strong) => inline_state.bold += 1,
-                Event::End(TagEnd::Strong) => inline_state.bold = inline_state.bold.saturating_sub(1),
+                Event::End(TagEnd::Strong) => {
+                    inline_state.bold = inline_state.bold.saturating_sub(1)
+                }
                 Event::Start(Tag::Emphasis) => inline_state.italic += 1,
-                Event::End(TagEnd::Emphasis) => inline_state.italic = inline_state.italic.saturating_sub(1),
+                Event::End(TagEnd::Emphasis) => {
+                    inline_state.italic = inline_state.italic.saturating_sub(1)
+                }
                 Event::Start(Tag::Strikethrough) => inline_state.strikethrough += 1,
                 Event::End(TagEnd::Strikethrough) => {
                     inline_state.strikethrough = inline_state.strikethrough.saturating_sub(1);
@@ -203,7 +217,9 @@ impl MarkdownParser {
                         style: inline_state.current_style(),
                     });
                 }
-                Event::End(TagEnd::BlockQuote(_)) => inline_state.blockquote = inline_state.blockquote.saturating_sub(1),
+                Event::End(TagEnd::BlockQuote(_)) => {
+                    inline_state.blockquote = inline_state.blockquote.saturating_sub(1)
+                }
                 Event::Code(code) => {
                     let mut style = inline_state.current_style();
                     style.code = true;
@@ -249,7 +265,11 @@ impl MarkdownParser {
         blocks
     }
 
-    fn push_text_block(blocks: &mut Vec<ParsedBlock>, spans: &mut Vec<InlineSpan>, style: &BlockStyle) {
+    fn push_text_block(
+        blocks: &mut Vec<ParsedBlock>,
+        spans: &mut Vec<InlineSpan>,
+        style: &BlockStyle,
+    ) {
         if spans.is_empty() {
             return;
         }

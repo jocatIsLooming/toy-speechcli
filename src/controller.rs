@@ -2,15 +2,15 @@ use std::fs;
 use std::io::{self, Write};
 
 use crossterm::{
+    ExecutableCommand, QueueableCommand,
     cursor::{Hide, MoveTo, Show},
     event::{self, Event, KeyCode, KeyEventKind},
     terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
-    ExecutableCommand, QueueableCommand,
 };
 
 use crate::parser::MarkdownParser;
 use crate::renderer::{
-    apply_opacity_to_line, strip_ansi, LineType, MarkdownRenderer, RenderedLine,
+    MarkdownRenderer, RenderedEntity, RenderedLine, apply_opacity_to_line, strip_ansi,
 };
 
 const LOW_OPACITY: u8 = 55;
@@ -30,9 +30,9 @@ pub fn run() -> io::Result<()> {
     let parser = MarkdownParser::new();
     let renderer = MarkdownRenderer::new();
     let parsed = parser.parse(&text);
-    let lines = renderer.render(&parsed);
+    let entities = renderer.render(&parsed);
 
-    if lines.is_empty() {
+    if entities.is_empty() {
         println!("No text to display");
         return Ok(());
     }
@@ -46,30 +46,26 @@ pub fn run() -> io::Result<()> {
     stdout.execute(EnterAlternateScreen)?;
     stdout.execute(Hide)?;
 
-    let mut current_idx = 0;
+    let mut current_entity_idx = first_focusable_entity(&entities).unwrap_or(0);
 
     loop {
         stdout.queue(Clear(ClearType::All))?;
 
-        let focus_idx = focus_index_for_line(&lines, current_idx);
-        let (display_rows, line_row_offsets, line_row_counts) =
-            build_display_rows(&lines, viewport_width);
+        let (display_rows, entity_row_offsets, entity_row_counts) =
+            build_display_rows(&entities, viewport_width);
 
-        let focus_row = line_row_offsets
-            .get(focus_idx)
+        let focus_row = entity_row_offsets
+            .get(current_entity_idx)
             .copied()
             .unwrap_or(0)
-            + line_row_counts
-                .get(focus_idx)
+            + entity_row_counts
+                .get(current_entity_idx)
                 .copied()
                 .unwrap_or(1)
                 .saturating_sub(1)
                 / 2;
 
-        let viewport_rows =
-            centered_viewport_rows(focus_row, display_rows.len(), viewport_height);
-
-        let active_block = active_block_range(&lines, current_idx);
+        let viewport_rows = centered_viewport_rows(focus_row, display_rows.len(), viewport_height);
 
         for (row, maybe_row_idx) in viewport_rows.iter().enumerate() {
             stdout.queue(MoveTo(0, row as u16))?;
@@ -78,18 +74,10 @@ pub fn run() -> io::Result<()> {
                 continue;
             };
 
-            let (line_idx, segment) = &display_rows[display_row_idx];
-            let line = &lines[*line_idx];
-            let in_active_block = active_block
-                .map(|(start, end)| *line_idx >= start && *line_idx <= end)
-                .unwrap_or(false);
-            let in_focus_band = is_in_focus_band(focus_idx, *line_idx, FOCUS_BAND_RADIUS);
-
-            let opacity = if in_active_block || in_focus_band {
-                255
-            } else {
-                LOW_OPACITY
-            };
+            let (entity_idx, line, segment) = &display_rows[display_row_idx];
+            let in_focus_band =
+                is_in_focus_band(current_entity_idx, *entity_idx, FOCUS_BAND_RADIUS);
+            let opacity = if in_focus_band { 255 } else { LOW_OPACITY };
 
             let wrapped_line = RenderedLine {
                 content: segment.clone(),
@@ -107,13 +95,18 @@ pub fn run() -> io::Result<()> {
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => break,
                     KeyCode::Down | KeyCode::Char('j') | KeyCode::Char(' ') => {
-                        current_idx = move_down(&lines, current_idx);
+                        current_entity_idx = move_down(&entities, current_entity_idx);
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
-                        current_idx = move_up(&lines, current_idx);
+                        current_entity_idx = move_up(&entities, current_entity_idx);
                     }
-                    KeyCode::Home => current_idx = 0,
-                    KeyCode::End => current_idx = lines.len().saturating_sub(1),
+                    KeyCode::Home => {
+                        current_entity_idx = first_focusable_entity(&entities).unwrap_or(0)
+                    }
+                    KeyCode::End => {
+                        current_entity_idx = last_focusable_entity(&entities)
+                            .unwrap_or_else(|| entities.len().saturating_sub(1))
+                    }
                     _ => {}
                 }
             }
@@ -152,66 +145,32 @@ fn centered_viewport_rows(
         .collect()
 }
 
-fn active_block_range(lines: &[RenderedLine], current_idx: usize) -> Option<(usize, usize)> {
-    block_range_at(lines, current_idx)
-}
-
-fn block_range_at(lines: &[RenderedLine], idx: usize) -> Option<(usize, usize)> {
-    if lines.is_empty() || idx >= lines.len() {
-        return None;
-    }
-
-    let line_type = lines[idx].line_type;
-    if line_type != LineType::CodeBlock && line_type != LineType::Table {
-        return None;
-    }
-
-    let mut start = idx;
-    while start > 0 && lines[start - 1].line_type == line_type {
-        start -= 1;
-    }
-
-    let mut end = idx;
-    while end + 1 < lines.len() && lines[end + 1].line_type == line_type {
-        end += 1;
-    }
-
-    Some((start, end))
-}
-
-fn focus_index_for_line(lines: &[RenderedLine], idx: usize) -> usize {
-    if let Some((start, end)) = block_range_at(lines, idx) {
-        start + (end - start) / 2
-    } else {
-        idx
-    }
-}
-
-fn is_in_focus_band(focus_idx: usize, line_idx: usize, radius: usize) -> bool {
+fn is_in_focus_band(focus_idx: usize, entity_idx: usize, radius: usize) -> bool {
     let start = focus_idx.saturating_sub(radius);
     let end = focus_idx.saturating_add(radius);
-    line_idx >= start && line_idx <= end
+    entity_idx >= start && entity_idx <= end
 }
 
 fn build_display_rows(
-    lines: &[RenderedLine],
+    entities: &[RenderedEntity],
     max_width: usize,
-) -> (Vec<(usize, String)>, Vec<usize>, Vec<usize>) {
+) -> (Vec<(usize, RenderedLine, String)>, Vec<usize>, Vec<usize>) {
     let mut rows = Vec::new();
-    let mut offsets = Vec::with_capacity(lines.len());
-    let mut counts = Vec::with_capacity(lines.len());
+    let mut offsets = Vec::with_capacity(entities.len());
+    let mut counts = Vec::with_capacity(entities.len());
     let max_width = max_width.max(MIN_VIEWPORT_WIDTH);
 
-    for (idx, line) in lines.iter().enumerate() {
+    for (entity_idx, entity) in entities.iter().enumerate() {
         offsets.push(rows.len());
 
-        let wrapped = wrap_rendered_line(line, max_width);
-        let count = wrapped.len().max(1);
-        counts.push(count);
-
-        for segment in wrapped {
-            rows.push((idx, segment));
+        let start_len = rows.len();
+        for line in &entity.lines {
+            for segment in wrap_rendered_line(line, max_width) {
+                rows.push((entity_idx, line.clone(), segment));
+            }
         }
+
+        counts.push(rows.len().saturating_sub(start_len).max(1));
     }
 
     (rows, offsets, counts)
@@ -306,75 +265,45 @@ fn list_indent_length(plain: &str) -> Option<usize> {
         chars.next();
     }
 
-    if digits > 0 {
-        if chars.next() == Some('.') && chars.next() == Some(' ') {
-            return Some(first_non_space + digits + 2);
-        }
+    if digits > 0 && chars.next() == Some('.') && chars.next() == Some(' ') {
+        return Some(first_non_space + digits + 2);
     }
 
     None
 }
 
-fn move_down(lines: &[RenderedLine], current_idx: usize) -> usize {
-    if lines.is_empty() {
+fn move_down(entities: &[RenderedEntity], current_idx: usize) -> usize {
+    if entities.is_empty() {
         return 0;
     }
 
-    if let Some((_, end)) = active_block_range(lines, current_idx) {
-        let target = end.saturating_add(1);
-        return find_nonempty_forward(lines, target).unwrap_or(current_idx);
-    }
-
-    if current_idx < lines.len() - 1 {
-        let target = current_idx + 1;
-        find_nonempty_forward(lines, target)
-            .map(|idx| focus_index_for_line(lines, idx))
-            .unwrap_or(current_idx)
-    } else {
-        current_idx
-    }
+    find_focusable_forward(entities, current_idx.saturating_add(1)).unwrap_or(current_idx)
 }
 
-fn move_up(lines: &[RenderedLine], current_idx: usize) -> usize {
-    if lines.is_empty() {
-        return 0;
+fn move_up(entities: &[RenderedEntity], current_idx: usize) -> usize {
+    if entities.is_empty() || current_idx == 0 {
+        return current_idx.min(entities.len().saturating_sub(1));
     }
 
-    if let Some((start, _)) = active_block_range(lines, current_idx) {
-        if start > 0 {
-            let target = start - 1;
-            return find_nonempty_backward(lines, target).unwrap_or(current_idx);
-        }
-        return 0;
-    }
-
-    if current_idx > 0 {
-        let target = current_idx - 1;
-        find_nonempty_backward(lines, target)
-            .map(|idx| focus_index_for_line(lines, idx))
-            .unwrap_or(current_idx)
-    } else {
-        current_idx
-    }
+    find_focusable_backward(entities, current_idx - 1).unwrap_or(current_idx)
 }
 
-fn is_nonempty(line: &RenderedLine) -> bool {
-    line.line_type != LineType::Empty && !line.content.trim().is_empty()
+fn first_focusable_entity(entities: &[RenderedEntity]) -> Option<usize> {
+    find_focusable_forward(entities, 0)
 }
 
-fn find_nonempty_forward(lines: &[RenderedLine], start: usize) -> Option<usize> {
-    for idx in start..lines.len() {
-        if is_nonempty(&lines[idx]) {
-            return Some(idx);
-        }
-    }
-    None
+fn last_focusable_entity(entities: &[RenderedEntity]) -> Option<usize> {
+    entities.iter().rposition(RenderedEntity::is_focusable)
 }
 
-fn find_nonempty_backward(lines: &[RenderedLine], start: usize) -> Option<usize> {
+fn find_focusable_forward(entities: &[RenderedEntity], start: usize) -> Option<usize> {
+    (start..entities.len()).find(|&idx| entities[idx].is_focusable())
+}
+
+fn find_focusable_backward(entities: &[RenderedEntity], start: usize) -> Option<usize> {
     let mut idx = start;
     loop {
-        if is_nonempty(&lines[idx]) {
+        if entities[idx].is_focusable() {
             return Some(idx);
         }
         if idx == 0 {

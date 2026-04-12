@@ -38,15 +38,15 @@ impl MarkdownRenderer {
         }
     }
 
-    pub fn render(&self, blocks: &[ParsedBlock]) -> Vec<RenderedLine> {
-        let mut lines = Vec::new();
+    pub fn render(&self, blocks: &[ParsedBlock]) -> Vec<RenderedEntity> {
+        let mut entities = Vec::new();
 
         for block in blocks {
             match block {
                 ParsedBlock::Text { spans, style } => {
                     let rendered = self.render_inline_spans(spans, style);
                     if rendered.is_empty() {
-                        lines.push(RenderedLine::empty());
+                        entities.push(RenderedEntity::empty());
                         continue;
                     }
 
@@ -55,27 +55,37 @@ impl MarkdownRenderer {
                         ..Default::default()
                     };
 
-                    lines.push(RenderedLine::styled(rendered, line_style));
+                    entities.push(RenderedEntity::new(vec![RenderedLine::styled(
+                        rendered, line_style,
+                    )]));
                 }
                 ParsedBlock::CodeBlock { lang, content } => {
-                    for line in self.render_code_block(lang, content) {
-                        lines.push(RenderedLine::code_block(line));
-                    }
+                    entities.push(RenderedEntity::new(
+                        self.render_code_block(lang, content)
+                            .into_iter()
+                            .map(RenderedLine::code_block)
+                            .collect(),
+                    ));
                 }
                 ParsedBlock::Table { rows } => {
-                    for line in self.render_table(rows) {
-                        lines.push(RenderedLine::table(line));
-                    }
+                    entities.push(RenderedEntity::new(
+                        self.render_table(rows)
+                            .into_iter()
+                            .map(RenderedLine::table)
+                            .collect(),
+                    ));
                 }
-                ParsedBlock::Empty => lines.push(RenderedLine::empty()),
-                ParsedBlock::Rule => lines.push(RenderedLine::text(format!(
-                    "{}──────────────────────────────{}",
-                    COLOR_GRAY, COLOR_RESET
-                ))),
+                ParsedBlock::Empty => entities.push(RenderedEntity::empty()),
+                ParsedBlock::Rule => {
+                    entities.push(RenderedEntity::new(vec![RenderedLine::text(format!(
+                        "{}──────────────────────────────{}",
+                        COLOR_GRAY, COLOR_RESET
+                    ))]))
+                }
             }
         }
 
-        lines
+        entities
     }
 
     fn render_inline_spans(&self, spans: &[InlineSpan], style: &BlockStyle) -> String {
@@ -219,7 +229,12 @@ impl MarkdownRenderer {
                 };
                 cells.push(format!(" {}{}{}", COLOR_GRAY, styled_cell, COLOR_GRAY));
             }
-            lines.push(format!("{}│{}│{}", COLOR_GRAY, cells.join("│"), COLOR_RESET));
+            lines.push(format!(
+                "{}│{}│{}",
+                COLOR_GRAY,
+                cells.join("│"),
+                COLOR_RESET
+            ));
 
             if row_idx == 0 && rendered_rows.len() > 1 {
                 lines.push(format!(
@@ -274,6 +289,27 @@ pub struct RenderedLine {
     pub content: String,
     pub style: Style,
     pub line_type: LineType,
+}
+
+#[derive(Clone, Default)]
+pub struct RenderedEntity {
+    pub lines: Vec<RenderedLine>,
+}
+
+impl RenderedEntity {
+    pub fn new(lines: Vec<RenderedLine>) -> Self {
+        Self { lines }
+    }
+
+    pub fn empty() -> Self {
+        Self {
+            lines: vec![RenderedLine::empty()],
+        }
+    }
+
+    pub fn is_focusable(&self) -> bool {
+        self.lines.iter().any(is_nonempty_rendered_line)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -342,6 +378,10 @@ impl RenderedLine {
             line_type: LineType::Empty,
         }
     }
+}
+
+fn is_nonempty_rendered_line(line: &RenderedLine) -> bool {
+    line.line_type != LineType::Empty && !line.content.trim().is_empty()
 }
 
 pub fn strip_ansi(text: &str) -> String {
@@ -523,7 +563,7 @@ fn split_table_prefix(text: &str) -> (String, &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::{InlineSpan, InlineStyle};
+    use crate::parser::{InlineSpan, InlineStyle, MarkdownParser};
 
     #[test]
     fn dims_text_before_first_escape_sequence() {
@@ -611,10 +651,46 @@ mod tests {
         }
 
         assert!(
-            rendered
-                .iter()
-                .any(|line| strip_ansi(line).contains('…')),
+            rendered.iter().any(|line| strip_ansi(line).contains('…')),
             "long cell content should be truncated with an ellipsis"
+        );
+    }
+
+    #[test]
+    fn groups_multiline_blocks_into_single_entities() {
+        let parser = MarkdownParser::new();
+        let renderer = MarkdownRenderer::new();
+        let parsed =
+            parser.parse("| h |\n| - |\n| v |\n\n```rust\nfn main() {}\nprintln!(\"hi\");\n```");
+
+        let rendered = renderer.render(&parsed);
+
+        let table_entity = rendered
+            .iter()
+            .find(|entity| {
+                entity
+                    .lines
+                    .iter()
+                    .any(|line| line.line_type == LineType::Table)
+            })
+            .expect("table entity should exist");
+        let code_entity = rendered
+            .iter()
+            .find(|entity| {
+                entity
+                    .lines
+                    .iter()
+                    .any(|line| line.line_type == LineType::CodeBlock)
+            })
+            .expect("code entity should exist");
+
+        assert!(
+            table_entity.lines.len() > 1,
+            "tables should stay grouped as one multi-line entity"
+        );
+        assert!(
+            code_entity.lines.len() > 1,
+            "code fences should stay grouped as one multi-line entity"
         );
     }
 }
