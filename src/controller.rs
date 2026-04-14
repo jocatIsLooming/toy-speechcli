@@ -8,6 +8,7 @@ use crossterm::{
     terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
 
+use crate::layout::{Layout, Rect};
 use crate::parser::MarkdownParser;
 use crate::renderer::{
     MarkdownRenderer, RenderedEntity, RenderedLine, apply_opacity_to_line, strip_ansi,
@@ -17,6 +18,7 @@ const LOW_OPACITY: u8 = 55;
 const FOCUS_BAND_RADIUS: usize = 2;
 const MIN_VIEWPORT_WIDTH: usize = 10;
 const ANSI_RESET: &str = "\x1b[0m";
+const FRAME_COLOR: &str = "\x1b[38;5;240m";
 
 pub fn run() -> io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -38,10 +40,6 @@ pub fn run() -> io::Result<()> {
     }
 
     let mut stdout = io::stdout();
-    let (cols, rows) = terminal::size()?;
-    let viewport_height = rows as usize;
-    let viewport_width = cols.max(MIN_VIEWPORT_WIDTH as u16) as usize;
-
     terminal::enable_raw_mode()?;
     stdout.execute(EnterAlternateScreen)?;
     stdout.execute(Hide)?;
@@ -51,8 +49,12 @@ pub fn run() -> io::Result<()> {
     loop {
         stdout.queue(Clear(ClearType::All))?;
 
+        let (cols, rows) = terminal::size()?;
+        let layout = Layout::centered_panel(cols, rows);
+        draw_frame(&mut stdout, layout.frame)?;
+
         let (display_rows, entity_row_offsets, entity_row_counts) =
-            build_display_rows(&entities, viewport_width);
+            build_display_rows(&entities, layout.content.width as usize);
 
         let focus_row = entity_row_offsets
             .get(current_entity_idx)
@@ -65,10 +67,11 @@ pub fn run() -> io::Result<()> {
                 .saturating_sub(1)
                 / 2;
 
-        let viewport_rows = centered_viewport_rows(focus_row, display_rows.len(), viewport_height);
+        let viewport_rows =
+            centered_viewport_rows(focus_row, display_rows.len(), layout.content.height as usize);
 
         for (row, maybe_row_idx) in viewport_rows.iter().enumerate() {
-            stdout.queue(MoveTo(0, row as u16))?;
+            stdout.queue(MoveTo(layout.content.x, layout.content.y + row as u16))?;
 
             let Some(display_row_idx) = *maybe_row_idx else {
                 continue;
@@ -116,6 +119,30 @@ pub fn run() -> io::Result<()> {
     stdout.execute(Show)?;
     stdout.execute(LeaveAlternateScreen)?;
     terminal::disable_raw_mode()?;
+
+    Ok(())
+}
+
+fn draw_frame(stdout: &mut io::Stdout, rect: Rect) -> io::Result<()> {
+    if rect.width < 2 || rect.height < 2 {
+        return Ok(());
+    }
+
+    let inner_width = rect.width.saturating_sub(2) as usize;
+    let top = format!("{}┌{}┐{}", FRAME_COLOR, "─".repeat(inner_width), ANSI_RESET);
+    let middle = format!("{}│{}│{}", FRAME_COLOR, " ".repeat(inner_width), ANSI_RESET);
+    let bottom = format!("{}└{}┘{}", FRAME_COLOR, "─".repeat(inner_width), ANSI_RESET);
+
+    stdout.queue(MoveTo(rect.x, rect.y))?;
+    print!("{}", top);
+
+    for y in rect.y + 1..rect.bottom() {
+        stdout.queue(MoveTo(rect.x, y))?;
+        print!("{}", middle);
+    }
+
+    stdout.queue(MoveTo(rect.x, rect.bottom()))?;
+    print!("{}", bottom);
 
     Ok(())
 }
