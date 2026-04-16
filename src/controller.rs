@@ -9,7 +9,7 @@ use crossterm::{
 };
 
 use crate::layout::{Layout, Rect};
-use crate::parser::MarkdownParser;
+use crate::parser::{InlineSpan, MarkdownParser, ParsedBlock};
 use crate::renderer::{
     MarkdownRenderer, RenderedEntity, RenderedLine, apply_opacity_to_line, strip_ansi,
 };
@@ -19,6 +19,16 @@ const FOCUS_BAND_RADIUS: usize = 2;
 const MIN_VIEWPORT_WIDTH: usize = 10;
 const ANSI_RESET: &str = "\x1b[0m";
 const FRAME_COLOR: &str = "\x1b[38;5;240m";
+const SIDEBAR_TITLE_COLOR: &str = "\x1b[38;5;252m";
+const SIDEBAR_ACTIVE_COLOR: &str = "\x1b[38;5;223m";
+const SIDEBAR_INACTIVE_COLOR: &str = "\x1b[38;5;245m";
+
+#[derive(Clone)]
+struct SidebarHeading {
+    entity_idx: usize,
+    level: u8,
+    title: String,
+}
 
 pub fn run() -> io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -33,6 +43,7 @@ pub fn run() -> io::Result<()> {
     let renderer = MarkdownRenderer::new();
     let parsed = parser.parse(&text);
     let entities = renderer.render(&parsed);
+    let headings = collect_sidebar_headings(&parsed);
 
     if entities.is_empty() {
         println!("No text to display");
@@ -51,7 +62,8 @@ pub fn run() -> io::Result<()> {
 
         let (cols, rows) = terminal::size()?;
         let layout = Layout::centered_panel(cols, rows);
-        draw_frame(&mut stdout, layout.frame)?;
+        draw_frame(&mut stdout, layout.sidebar_frame)?;
+        draw_sidebar(&mut stdout, layout.sidebar_content, &headings, current_entity_idx)?;
 
         let (display_rows, entity_row_offsets, entity_row_counts) =
             build_display_rows(&entities, layout.content.width as usize);
@@ -147,6 +159,42 @@ fn draw_frame(stdout: &mut io::Stdout, rect: Rect) -> io::Result<()> {
     Ok(())
 }
 
+fn draw_sidebar(
+    stdout: &mut io::Stdout,
+    rect: Rect,
+    headings: &[SidebarHeading],
+    current_entity_idx: usize,
+) -> io::Result<()> {
+    if rect.width == 0 || rect.height == 0 {
+        return Ok(());
+    }
+
+    let sidebar_rows = build_sidebar_rows(headings, rect.width as usize, current_entity_idx);
+    let active_heading_idx = active_heading_index(headings, current_entity_idx).unwrap_or(0);
+    let viewport_rows = centered_viewport_rows(
+        active_heading_idx,
+        sidebar_rows.len(),
+        rect.height as usize,
+    );
+
+    for (row, maybe_row_idx) in viewport_rows.iter().enumerate() {
+        stdout.queue(MoveTo(rect.x, rect.y + row as u16))?;
+
+        let Some(row_idx) = *maybe_row_idx else {
+            print!("{}", " ".repeat(rect.width as usize));
+            continue;
+        };
+
+        let row_text = sidebar_rows
+            .get(row_idx)
+            .cloned()
+            .unwrap_or_else(String::new);
+        print!("{}{}", pad_visible(&row_text, rect.width as usize), ANSI_RESET);
+    }
+
+    Ok(())
+}
+
 fn centered_viewport_rows(
     focus_row: usize,
     total_rows: usize,
@@ -172,10 +220,65 @@ fn centered_viewport_rows(
         .collect()
 }
 
+fn build_sidebar_rows(
+    headings: &[SidebarHeading],
+    max_width: usize,
+    current_entity_idx: usize,
+) -> Vec<String> {
+    let usable_width = max_width.max(1);
+    let mut rows = wrap_plain_text("Outline", usable_width);
+    if !rows.is_empty() {
+        rows[0] = format!("{}{}{}", SIDEBAR_TITLE_COLOR, rows[0], ANSI_RESET);
+    }
+    rows.push(String::new());
+
+    if headings.is_empty() {
+        rows.extend(wrap_plain_text("No headings found", usable_width).into_iter().map(|line| {
+            format!("{}{}{}", SIDEBAR_INACTIVE_COLOR, line, ANSI_RESET)
+        }));
+        return rows;
+    }
+
+    let active_idx = active_heading_index(headings, current_entity_idx);
+    for (idx, heading) in headings.iter().enumerate() {
+        let indent = "  ".repeat(heading.level.saturating_sub(1).min(3) as usize);
+        let marker = if Some(idx) == active_idx { ">" } else { " " };
+        let prefix = format!("{}{} ", marker, indent);
+        let wrapped = wrap_plain_text(
+            &format!("{}{}", prefix, heading.title),
+            usable_width,
+        );
+        let continuation_indent = " ".repeat(prefix.chars().count());
+        let color = if Some(idx) == active_idx {
+            SIDEBAR_ACTIVE_COLOR
+        } else {
+            SIDEBAR_INACTIVE_COLOR
+        };
+
+        for (line_idx, line) in wrapped.into_iter().enumerate() {
+            let display = if line_idx == 0 {
+                line
+            } else {
+                format!("{}{}", continuation_indent, line.trim_start())
+            };
+            rows.push(format!("{}{}{}", color, display, ANSI_RESET));
+        }
+    }
+
+    rows
+}
+
 fn is_in_focus_band(focus_idx: usize, entity_idx: usize, radius: usize) -> bool {
     let start = focus_idx.saturating_sub(radius);
     let end = focus_idx.saturating_add(radius);
     entity_idx >= start && entity_idx <= end
+}
+
+fn active_heading_index(headings: &[SidebarHeading], current_entity_idx: usize) -> Option<usize> {
+    headings
+        .iter()
+        .rposition(|heading| heading.entity_idx <= current_entity_idx)
+        .or_else(|| (!headings.is_empty()).then_some(0))
 }
 
 fn build_display_rows(
@@ -201,6 +304,32 @@ fn build_display_rows(
     }
 
     (rows, offsets, counts)
+}
+
+fn collect_sidebar_headings(blocks: &[ParsedBlock]) -> Vec<SidebarHeading> {
+    blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(entity_idx, block)| match block {
+            ParsedBlock::Text { spans, style } => style.heading_level.map(|level| SidebarHeading {
+                entity_idx,
+                level,
+                title: plain_text_from_spans(spans),
+            }),
+            _ => None,
+        })
+        .filter(|heading| !heading.title.is_empty())
+        .collect()
+}
+
+fn plain_text_from_spans(spans: &[InlineSpan]) -> String {
+    spans
+        .iter()
+        .flat_map(|span| span.text.chars())
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn wrap_rendered_line(line: &RenderedLine, max_width: usize) -> Vec<String> {
@@ -273,6 +402,75 @@ fn wrap_rendered_line(line: &RenderedLine, max_width: usize) -> Vec<String> {
     wrapped
 }
 
+fn wrap_plain_text(text: &str, max_width: usize) -> Vec<String> {
+    if max_width == 0 {
+        return Vec::new();
+    }
+
+    let mut rows = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0;
+
+    for word in text.split_whitespace() {
+        let word_width = word.chars().count();
+        let separator = usize::from(!current.is_empty());
+
+        if current_width + separator + word_width <= max_width {
+            if separator == 1 {
+                current.push(' ');
+                current_width += 1;
+            }
+            current.push_str(word);
+            current_width += word_width;
+            continue;
+        }
+
+        if !current.is_empty() {
+            rows.push(current);
+            current = String::new();
+        }
+
+        if word_width <= max_width {
+            current.push_str(word);
+            current_width = word_width;
+            continue;
+        }
+
+        let mut chunk = String::new();
+        let mut chunk_width = 0;
+        for ch in word.chars() {
+            if chunk_width == max_width {
+                rows.push(chunk);
+                chunk = String::new();
+                chunk_width = 0;
+            }
+            chunk.push(ch);
+            chunk_width += 1;
+        }
+        current = chunk;
+        current_width = chunk_width;
+    }
+
+    if !current.is_empty() {
+        rows.push(current);
+    }
+
+    if rows.is_empty() {
+        rows.push(String::new());
+    }
+
+    rows
+}
+
+fn pad_visible(text: &str, width: usize) -> String {
+    let visible = strip_ansi(text).chars().count();
+    if visible >= width {
+        return text.to_string();
+    }
+
+    format!("{}{}", text, " ".repeat(width - visible))
+}
+
 fn list_indent_length(plain: &str) -> Option<usize> {
     let first_non_space = plain
         .char_indices()
@@ -339,4 +537,42 @@ fn find_focusable_backward(entities: &[RenderedEntity], start: usize) -> Option<
         idx -= 1;
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collects_headings_for_sidebar() {
+        let parser = MarkdownParser::new();
+        let parsed = parser.parse("# Intro\n\n## Details\nBody");
+
+        let headings = collect_sidebar_headings(&parsed);
+
+        assert_eq!(headings.len(), 2);
+        assert_eq!(headings[0].title, "Intro");
+        assert_eq!(headings[1].level, 2);
+        assert_eq!(headings[1].title, "Details");
+    }
+
+    #[test]
+    fn active_heading_tracks_current_entity() {
+        let headings = vec![
+            SidebarHeading {
+                entity_idx: 0,
+                level: 1,
+                title: "Intro".to_string(),
+            },
+            SidebarHeading {
+                entity_idx: 5,
+                level: 2,
+                title: "Details".to_string(),
+            },
+        ];
+
+        assert_eq!(active_heading_index(&headings, 0), Some(0));
+        assert_eq!(active_heading_index(&headings, 4), Some(0));
+        assert_eq!(active_heading_index(&headings, 5), Some(1));
+    }
 }
